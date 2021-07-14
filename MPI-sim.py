@@ -38,10 +38,10 @@ import pandas as pd
 import datetime
 matplotlib.use('TkAgg')
 
-
+#initialize the MPI object
 comm = MPI.COMM_WORLD
 rank = comm.rank
-nprocs = comm.Get_size()
+nprocs = comm.Get_size()    #number of parallel processes
 
 #let rank 0 do the initializing of the bundle and bcast relevant info to other ranks
 if rank == 0:
@@ -153,22 +153,25 @@ if rank == 0:
     bundle.add_excitation_mechanism(PyPNS.StimIntra(**intraParameters))
     bundle.add_excitation_mechanism(PyPNS.StimField(**extraParameters))
 
-    # # add recording electrodes. One for each extracellular medium
-    # for extracellularMech in extracellularMechs:
-    #     bundle.add_recording_mechanism(PyPNS.RecordingMechanism(electrodePoints, extracellularMech))
 
     #need to bcast required info to all processes
-    # bcast_data = (bundle.numberOfAxons, bundle.numUnmyel, bundle.axonCoords, bundle.excitationMechanisms, recordingParametersNew)
-    bcast_data = (bundle, recordingParametersNew)
+    #{
+    # ABOUT BCAST:
+    # bcast pickles the data and sends it to all processes. The two non-pickle-able objects
+    # in the bundle are (1) recording mechanisms and (2) axons objects. These are therefore 
+    # instantiated in the processes. Without these, the bundle object can be bcast to all processes
+    # from the rank 0 which did the initializing}
+    bcast_data = (bundle, recordingParametersNew)   #recordingParametersNew is to create rec mechanisms
+#for all other ranks, set to None
 else:
     bcast_data = None
 
 #get the bcast data and set it to readable variables
-bcast_data = comm.bcast(bcast_data, root=0)
+bcast_data = comm.bcast(bcast_data, root=0)     #all ranks now have the required dat
 bundle = bcast_data[0]
 recordingParametersNew = bcast_data[1]
 
-# #now we instantiate the recording mechansisms is every rank
+# #now we instantiate the recording mechansisms in every rank
 electrodePoints = PyPNS.createGeometry.circular_electrode(**recordingParametersNew)
 extracellularMechs = []
 extracellularMechs.append(PyPNS.Extracellular.homogeneous(sigma=1))
@@ -178,11 +181,14 @@ extracellularMechs.append(PyPNS.Extracellular.analytic(recordingParametersNew['b
 for extracellularMech in extracellularMechs:
     bundle.add_recording_mechanism(PyPNS.RecordingMechanism(electrodePoints, extracellularMech))
 
-#create axon objects contianing the NEURON HocObject
+#{create axon objects contianing the NEURON HocObject
+#   this is a custom function I created which simply moves the axon instatiation
+#   away from the class init() function into its own so the axons can be instantiated
+#   when needed
+# }
 bundle.create_axon_objects()
 
-# #find which ranks simulate which axons
-# #if final rank, then it will sim the remainder
+#establishes which ranks simulate which axons. If 4 axons, 3 procs: rank0->a0,a3; rank1->a1, rank2->a2
 axonsToSim = int(bundle.numberOfAxons/nprocs)
 if rank < (bundle.numberOfAxons%nprocs):
     axonsToSim += 1
@@ -191,5 +197,10 @@ axonIndexList = []
 for count in range(axonsToSim):
     axonIndexList.append(rank + count* nprocs)
 
+#simulate the axons depending on the process rank using its axon sim list
+#   this is also a modified function that simply simulates the desired axons instead of all axons
 sim_times = bundle.simulate_axons(axonIndexList)
+
+#TODO: Now we need to gather the CAP output of the simulations and sum them all. Not done yet
+#   since the simulations still take longer, so need to fix that before
 
