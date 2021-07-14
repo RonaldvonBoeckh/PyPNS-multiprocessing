@@ -1,4 +1,3 @@
-import multiprocessing
 from PyPNS.axonClass import *
 import PyPNS.createGeometry as createGeometry
 
@@ -26,77 +25,6 @@ from scipy.signal import argrelextrema
 from scipy.interpolate import interp1d
 
 from PyPNS.nameSetters import *
-
-from multiprocessing import Process, Manager 
-
-import os
-
-def simulate_axon(axonIndex, axon, excitationMechanisms, recordingMechanisms, mp_data, timings):
-    print("\nStarting simulation of axon " + str(axonIndex))
-    t_axonStartTime = time.time()
-
-    # create the neuron object specified in the axon class object
-    axon.create_neuron_object()
-
-    # connect stimulus, spontaneous spiking, etc.
-    for excitationMechanism in excitationMechanisms:
-        excitationMechanism.connect_axon(axon)
-
-    # setup recorder for time
-    # TODO: this has changed, now every axon has trec
-    axon.trec = h.Vector()
-    axon.trec.record(h._ref_t)
-
-    # here we correct the conductance of the slow potassium channel from 0.08 S/cm2 to 0.12 S/cm2 to prevent
-    # multiple action potentials for thin fibers
-    h('forall for (x,0) if (ismembrane("axnode")) gkbar_axnode(x) = 0.12') # .16
-    t_axonInit = time.time()
-
-    # with takeTime("calculate voltage and membrane current"):
-    t_simComposite = axon.simulate(index = axonIndex)
-
-    t_sim_done = time.time()
-
-    if len(recordingMechanisms) > 0:
-    # with takeTime("calculate extracellular potential"):
-        recMechIndex = 0
-        cap_results = []
-        for recMech in recordingMechanisms:
-            cap_results.append(recMech.compute_single_axon_CAP(axon))
-            recMechIndex += 1
-    else:
-        print('No recording mechanisms added. No CAP will be recorded.')
-
-    t_computeCAPDone = time.time()
-
-    # TODO: regularize time step for current and voltage here, so you don't need to care about it later
-    # TODO: first check how long the interpolation takes.
-
-    # if self.saveV:
-    #     with takeTime("save membrane potential to disk"):
-    #         self.save_voltage_to_file_axonwise(axonIndex)
-
-    # if self.saveI:
-    #     with takeTime('save membrane current to disk'):
-    #         self.save_imem_to_file_axonwise(axonIndex)
-
-    # delete the object
-    axon.delete_neuron_object()
-
-    t_axonEndTime = time.time()
-
-    t_init = t_axonInit - t_axonStartTime
-    t_computeCAP = t_computeCAPDone - t_sim_done
-    t_saveToFile = t_axonEndTime - t_computeCAPDone
-    t_elapsedAxon = t_axonEndTime - t_axonStartTime
-    # print ("Overall processing of axon %i took %.2f s. ( %.2f %% saving.)" % (axonIndex, elapsedAxon, (elapsedSaveV + elapsedSaveLFP)/elapsedAxon*100))
-    print ("Overall processing of axon %i took %.2f s." % (axonIndex, t_elapsedAxon))
-
-    #append the timings data and sim data to their respective manager lists
-    ret = timings.append([t_init, t_simComposite, t_computeCAP, t_saveToFile, t_elapsedAxon, axon.axontotal])
-    assert ret == None
-    ret = mp_data.append([cap_results, axon.trec])
-    assert ret == None
 
 class Bundle(object):
     # radiusBundle: Radius of the bundle (typically 0.5-1.5mm)
@@ -196,6 +124,10 @@ class Bundle(object):
 
         self.basePath = get_bundle_directory(self.saveParams, new = True)
 
+    def create_axon_objects(self):
+        """New function added by Andrew. This code was the final step in the init() function
+        but is moved here so that axon objects can be instatiated when desired (i.e. within proecesses)
+        instead of with the bundle initialization"""
         # create axon-specific color
         jet = plt.get_cmap('Paired')
         cNorm = colors.Normalize(vmin=0, vmax=self.numberOfAxons)#len(diameters_m)-1)#
@@ -456,13 +388,8 @@ class Bundle(object):
         # print '================ Starting to simulate ================'
         # print '======================================================'
 
-        #add pool to store trec and CAPs from individual axon simulation
-        manager = Manager()
-        mp_data = manager.list()
-        timings = manager.list()
-
         # exectue the NEURON and LFPy calculations of all axons
-        sim_timings = self.simulate_axons(mp_data, timings)
+        sim_times = self.simulate_axons()
         print ('\nAll axons simulated.')
 
         # once simulation is over get rid of the all Neuron objects to be able to pickle the bundle-class.
@@ -472,26 +399,13 @@ class Bundle(object):
             excitationMechanism.delete_neuron_objects()
 
         # TODO: for now trec is saved as the global time vector in the bundle. However it is only valid for the CAP if a variabletime step is used.
-        # if isinstance(self.timeRes, numbers.Number):
-        #     # if the time step is constant, all axons have the same time vector
-        #     self.trec = self.axons[0].trec
-        # else:
-        #     # create regularized time vector with a time step set in constants
-        #     self.createTimeVector()
-
         if isinstance(self.timeRes, numbers.Number):
             # if the time step is constant, all axons have the same time vector
-            self.trec = mp_data[0][1]
+            self.trec = self.axons[0].trec
         else:
             # create regularized time vector with a time step set in constants
             self.createTimeVector()
 
-        for sim in mp_data:
-            recMechIndex = 0
-            for recMech in self.recordingMechanisms:
-                recMech.CAP_axonwise.append(sim[0][recMechIndex])
-                recMechIndex = recMechIndex + 1
-            
         # compute the compound action potential by summing all axon contributions up, save it, delete variables
         with takeTime('compute CAP from single axon contributions'):
             self.compute_CAPs()
@@ -503,25 +417,82 @@ class Bundle(object):
         for recMech in self.recordingMechanisms:
             recMech.clean_up()
 
-        return sim_timings
+        return sim_times
 
-    def simulate_axons(self, mp_data, timings):
+    def simulate_axons(self, axonIndeces):
         """
-        Routine called by :meth:`bundleClass.Bundle.simulate` to simulate all axons.
+        Modified by Andrew. This function is called by the higher level script to simulate
+        a list of specific axons.
 
-        param q: queue to store axon sim results
+        param axonIndeces: list of indeces of the axons to be simulated
+
+        return sim_times_labeled: a dict containing the time taken by various parts of the simulation code
         """
-        #list to store all started processes
-        processes = []
-        for axonIndex in range(self.numberOfAxons):
-            process = Process(target=simulate_axon, args=(axonIndex, self.axons[axonIndex], self.excitationMechanisms, self.recordingMechanisms, mp_data, timings))
-            process.start()
-            processes.append(process)
+        sim_times = []
+        for axonIndex in axonIndeces:
 
-        #join all processes
-        for p in processes:
-            p.join()
+            print("\nStarting simulation of axon " + str(axonIndex))
+            t_axonStartTime = time.time()
 
+            axon = self.axons[axonIndex]
+
+            # create the neuron object specified in the axon class object
+            axon.create_neuron_object()
+
+            # connect stimulus, spontaneous spiking, etc.
+            for excitationMechanism in self.excitationMechanisms:
+                excitationMechanism.connect_axon(axon)
+
+            # setup recorder for time
+            # TODO: this has changed, now every axon has trec
+            axon.trec = h.Vector()
+            axon.trec.record(h._ref_t)
+
+            # here we correct the conductance of the slow potassium channel from 0.08 S/cm2 to 0.12 S/cm2 to prevent
+            # multiple action potentials for thin fibers
+            h('forall for (x,0) if (ismembrane("axnode")) gkbar_axnode(x) = 0.12') # .16
+            t_axonInit = time.time()
+
+            # with takeTime("calculate voltage and membrane current"):
+            t_simComposite = axon.simulate()
+
+            t_sim_done = time.time()
+
+            if len(self.recordingMechanisms) > 0:
+                # with takeTime("calculate extracellular potential"):
+                recMechIndex = 0
+                for recMech in self.recordingMechanisms:
+                    recMech.compute_single_axon_CAP(axon)
+                    recMechIndex += 1
+            else:
+                print('No recording mechanisms added. No CAP will be recorded.')
+
+            t_computeCAPDone = time.time()
+
+            # TODO: regularize time step for current and voltage here, so you don't need to care about it later
+            # TODO: first check how long the interpolation takes.
+
+            if self.saveV:
+                with takeTime("save membrane potential to disk"):
+                    self.save_voltage_to_file_axonwise(axonIndex)
+
+            if self.saveI:
+                with takeTime('save membrane current to disk'):
+                    self.save_imem_to_file_axonwise(axonIndex)
+
+            # delete the object
+            axon.delete_neuron_object()
+
+            t_axonEndTime = time.time()
+            
+            t_init = t_axonInit - t_axonStartTime
+            t_computeCAP = t_computeCAPDone - t_sim_done
+            t_saveToFile = t_axonEndTime - t_computeCAPDone
+            t_elapsedAxon = t_axonEndTime - t_axonStartTime
+            # print ("Overall processing of axon %i took %.2f s. ( %.2f %% saving.)" % (axonIndex, elapsedAxon, (elapsedSaveV + elapsedSaveLFP)/elapsedAxon*100))
+            print ("Overall processing of axon %i took %.2f s." % (axonIndex, t_elapsedAxon))
+            sim_times.append([t_init, t_simComposite, t_computeCAP, t_saveToFile, t_elapsedAxon, axon.axontotal])
+        
         t_inits = []
         t_simInits = []
         t_simSims = []
@@ -530,7 +501,7 @@ class Bundle(object):
         t_saveToFiles = []
         t_elapsedAxons = []
         axonLengths = []
-        for sim in timings:
+        for sim in sim_times:
             t_inits.append(sim[0])
             t_simInits.append(sim[1][0])
             t_simSims.append(sim[1][1])
@@ -542,12 +513,6 @@ class Bundle(object):
 
         sim_times_labeled = {'t_init': t_inits, 't_simInit': t_simInits, 't_simSim': t_simSims, 't_sim_imem': t_simImems, 't_computeCAP': t_computeCaps, 't_saveToFile': t_saveToFiles, 't_elapsedAxon': t_elapsedAxons, 'axon_length': axonLengths}
         return sim_times_labeled
-
-        
-
-    
-    
-            
 
 
     def store_geometry(self):

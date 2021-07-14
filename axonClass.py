@@ -614,9 +614,9 @@ class Unmyelinated(Axon):
         self.Ra = Ra
         self.hhDraw = hhDraw
 
-        print("Unmyelinated axon diameter: " + str(self.fiberD))
+        # print("Unmyelinated axon diameter: " + str(self.fiberD))
 
-        print('Number of segments for unmyelinated axon: %i' % self.get_number_of_segs())
+        # print('Number of segments for unmyelinated axon: %i' % self.get_number_of_segs())
 
     def get_number_of_segs(self, d_lambda=0.1, lambda_freq=100):
 
@@ -909,7 +909,7 @@ class Myelinated(Axon):
 
         self.endOverlap = 7 # number of axon segments after last node
 
-        print('Myelinated fiber diameter: ' + str(self.fiberD))
+        # print('Myelinated fiber diameter: ' + str(self.fiberD))
 
         # initialize variables to store NEURON elements in
         self.nodes = None
@@ -965,7 +965,7 @@ class Myelinated(Axon):
         # self.axontotal= self.axonnodes+self.paranodes1+self.paranodes2+self.axoninter
         self.axontotal= self.axonnodes+self.paranodes1+self.paranodes2+self.axoninter + self.endOverlap
 
-        print('Number of segments for myelinated axon: %i' % self.axontotal)
+        # print('Number of segments for myelinated axon: %i' % self.axontotal)
 
     def createSingleNode(self, nodeType):
 
